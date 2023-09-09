@@ -1,0 +1,3 @@
+pyinstaller -F -w -i  ico/favicon.ico rybafish.py
+
+pyinstaller rybafish.spec
