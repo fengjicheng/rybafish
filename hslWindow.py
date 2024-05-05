@@ -3,7 +3,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QFrame,
     QTableWidgetItem, QPushButton, QAbstractItemView,
     QCheckBox, QMainWindow, QAction, QMenu, QFileDialog,
     QMessageBox, QTabWidget, QPlainTextEdit, QInputDialog, 
-    QApplication
+                             QApplication, QDialog
     )
     
 from PyQt5.QtGui import QPainter, QIcon, QDesktopServices
@@ -39,19 +39,19 @@ from utils import dbException, msgDialog
 from SQLBrowserDialog import SQLBrowserDialog
 
 import utils
-
 import customSQLs
-
 import kpiDescriptions
-
 import sys, os
-
 import time
 
 from _constants import build_date, version
 
 from updatesCheck import checkUpdates
 from csvImportDialog import csvImportDialog
+import highlight
+
+import presetsDialog
+from passwordDialog import pwdDialog
 
 from profiler import profiler
 
@@ -60,9 +60,8 @@ class hslWindow(QMainWindow):
     statusbar = None
     primaryConf = None # primary connection dictionary, keys: host, port, name, dbi, user, pwd, etc
     configurations = {}
-    
+
     kpisTable = None
-    
     threadID = None
 
     def __init__(self):
@@ -72,6 +71,7 @@ class hslWindow(QMainWindow):
         self.sqlTabCounter = 0 #static tab counter
 
         self.tabs = None
+        self.kpisSave = {}      # list of kpis for quick save/restore
     
         super().__init__()
         
@@ -79,6 +79,7 @@ class hslWindow(QMainWindow):
         log(f'[thread] main window thread: {self.threadID}', 5)
         
         self.initUI()
+        highlight.loadHighlights()
         
         if cfg('updatesCheckInterval', '7'):
             if self.layout is not None:
@@ -169,6 +170,12 @@ class hslWindow(QMainWindow):
             
         elif modifiers == Qt.ControlModifier and event.key() == Qt.Key_W:
             self.closeTab()
+        elif modifiers == Qt.ControlModifier and event.key() == Qt.Key_L:
+            self.chartArea.widget.toggleLegend()
+        elif modifiers == Qt.ControlModifier and event.key() == Qt.Key_L:
+            self.chartArea.widget.toggleLegend()
+        elif event.key() == Qt.Key_L and modifiers & Qt.ControlModifier and modifiers & Qt.ShiftModifier:
+            self.chartArea.widget.toggleGanttLabels()
         else:
             super().keyPressEvent(event)
             
@@ -430,6 +437,17 @@ class hslWindow(QMainWindow):
     def menuReloadCustomSQLs(self):
         customSQLs.loadSQLs()
     
+
+    def menuHighlights(self):
+        c = highlight.loadHighlights()
+
+        if c is not None:
+            self.statusMessage(f'Highlights definition updated, {c} records loaded', True)
+        else:
+            self.statusMessage('Seems an error, check logs for details', True)
+
+        highlight.dumpHighlights()
+
     def menuReloadCustomKPIs(self):
         '''
             delete and rebuild custom kpis
@@ -525,7 +543,192 @@ class hslWindow(QMainWindow):
             self.resize(size[0], size[1])
             self.mainSplitter.setSizes(spl)
         
-        
+
+
+    # def menuPresetRestore(self, preset):
+    #     '''generates function for specific preset restore call'''
+    #     def f(self):
+    #         log(f'Restore preset: {preset}', 3)
+    #         self.menuPresetRestore(preset)
+
+    #     deb(self)
+    #     f.preset = preset
+    #     f.self = self
+    #     return f
+
+    def presetProxy(self, preset):
+        '''preset factory to hardcode preset as menu callback cannot provide any context'''
+        def f():
+            self.menuKPIsRestorePreset(preset)
+
+        return f
+
+
+    def menuPresetPopulate(self):
+        self.presetsSubMenu.clear()
+
+        presetNames = presetsDialog.presets.list()
+
+        if presetNames:
+            for preset in presetNames:
+                presetAct = QAction(preset, self)
+
+                presetAct.triggered.connect(
+                    # lambda p = preset: self.menuKPIsRestorePreset(p)
+                    # lambda p=preset: self.presetProxy(preset)
+                    self.presetProxy(preset)
+                )
+
+                self.presetsSubMenu.addAction(presetAct)
+
+        else:
+            noPresets = QAction('No presets', self)
+            self.presetsSubMenu.addAction(noPresets)
+
+    def menuKPIsRestorePreset(self, presetName):
+        '''restore preset based on name'''
+        preset = presetsDialog.presets.get(presetName)
+
+        log(f'Extracting preset: {presetName}', 4)
+
+        if not preset:
+            log(f'[w] no preset? {presetName} --> {preset}', 2)
+            return
+
+        hostWithKpis = None
+
+        for hi in range(len(self.chartArea.widget.hosts)):
+            host = self.chartArea.widget.hosts[hi]
+            hname = f"{host['host']}:{host['port']}"
+
+            if hname in preset:
+                kpisList = preset[hname]
+
+                kpis = []
+
+                for kpisVar in kpisList:
+                    if type(kpisVar) == list and len(kpisVar) == 2:
+                        kpi, vars = kpisVar[0], kpisVar[1]
+
+
+
+                        kpiStyles = self.chartArea.widget.hostKPIsStyles[hi]
+                        style = kpiStyles.get(kpi)
+
+                        if style:
+                            idx = style.get('sql')
+
+                        if idx:
+                            log(f'set variables: {idx} -> {vars}', 4)
+                            kpiDescriptions.addVars(idx, vars, True) # update variables
+
+                        else:
+                            log(f'[w] no idx for existing variables?', 2)
+                    else:
+                        kpi = kpisVar
+                        vars = None
+
+                    kpis.append(kpi)
+
+                if kpis:
+                    log(f'Restoring: {hname} --> {kpis}', 5)
+                    self.chartArea.widget.nkpis[hi] = kpis
+
+                    if hostWithKpis is None:
+                        hostWithKpis = hi # remmember host to switch to after restore
+                else:
+                    log(f'Restoring 1: {hname} --> []', 5)
+                    self.chartArea.widget.nkpis[hi].clear()
+            else:
+                log(f'Restoring 2: {hname} --> []', 5)
+                self.chartArea.widget.nkpis[hi].clear()
+
+
+        if hostWithKpis is None:
+            hostWithKpis = self.hostTable.currentRow()
+
+        self.hostTable.setCurrentCell(hostWithKpis, 0)
+        self.kpisTable.refill(hostWithKpis)
+
+    def menuKPIsRestore(self):
+        '''Restore enabled kpis from local quick list stored before '''
+
+        if len(self.kpisSave) == 0:
+            self.statusMessage('There are no KPIs saved, use Layout -> Save KPIs first', True)
+
+        for hi in range(len(self.chartArea.widget.hosts)):
+
+            host = self.chartArea.widget.hosts[hi]
+            hname = f"{host['host']}:{host['port']}"
+
+            if hname in self.kpisSave:
+                log(f'Restoring: {hname} --> {self.kpisSave[hname]}', 5)
+                self.chartArea.widget.nkpis[hi] = self.kpisSave[hname]
+
+            else:
+                log(f'Restoring: {hname} --> []', 5)
+                self.chartArea.widget.nkpis[hi].clear()
+
+
+    def menuPresersManage(self):
+        dialog = presetsDialog.PresetsDialog(self, None)
+        rslt = dialog.exec_()
+
+        if rslt == QDialog.Accepted:
+            self.menuPresetPopulate()
+        else:
+            log('manage presets cancel, do reload...', 4)
+            presetsDialog.presets = presetsDialog.Presets()
+
+    def menuKPIsSave(self):
+        self.kpisSave = {}
+
+        hostPreset = {}
+
+        hn = -1
+        for host, kpis in zip(self.chartArea.widget.hosts, self.chartArea.widget.nkpis):
+            hn +=1
+
+            if not kpis:
+                continue
+
+            hname = f"{host['host']}:{host['port']}"
+            print('-->', hname)
+
+            if cfg('presetVariables', True) == False:
+                # old style: no variables
+                self.kpisSave[hname] = kpis.copy()
+                continue
+
+            # build variables
+
+            kpisVars = []
+            for kpi in kpis:
+                kpiStyles = self.chartArea.widget.hostKPIsStyles[hn]
+                style = kpiStyles[kpi]
+
+                vars = None
+
+                idx = style.get('sql')
+
+                if idx:
+                    vars = kpiDescriptions.vrsStr.get(idx)
+
+                if vars is None:
+                    kpisVars.append(kpi)   # no vars - single value
+                else:
+                    kpisVars.append([kpi, vars]) # tuple --> list because of yaml dump()/safe_load issues
+
+            hostPreset[hname] = kpisVars
+
+        preset = presetsDialog.PresetsDialog(self, preset=hostPreset)
+        rslt = preset.exec_()
+
+        if rslt == QDialog.Accepted:
+            self.menuPresetPopulate()
+        else:
+            pass
+
     def menuLayout(self):
         self.layout['save_size'] = [self.size().width(), self.size().height()]
         self.layout['save_pos'] = [self.pos().x(), self.pos().y()]
@@ -828,24 +1031,29 @@ class hslWindow(QMainWindow):
 
                         w = self.tabs.widget(i)
 
-                        if isinstance(w, sqlConsole.sqlConsole) and w.conn is not None:
+                        if isinstance(w, sqlConsole.sqlConsole):
                             tabname = w.tabname.rstrip(' *')
-                            '''
-                            if abandon:
-                                log(f'ignoring close for {tabname} due to abandone = True', 4) # bug #781
-                                w.dbi = None
-                                w.conn = None
-                                w.connection_id = None
-                                w.sqlRunning = False
-                            else:
+                            if w.timerReconnect is not None:
+                                w.timerReconnect.stop()
+                                w.timerReconnect = None
+                                log(f'{tabname} timerReconnect disabled due to explicit re-connect')
+                            if w.conn is not None:
+                                '''
+                                if abandon:
+                                    log(f'ignoring close for {tabname} due to abandone = True', 4) # bug #781
+                                    w.dbi = None
+                                    w.conn = None
+                                    w.connection_id = None
+                                    w.sqlRunning = False
+                                else:
+                                    log(f'closing connection of {tabname}...')
+                                    w.disconnectDB()
+                                '''
                                 log(f'closing connection of {tabname}...')
                                 w.disconnectDB()
-                            '''
-                            log(f'closing connection of {tabname}...')
-                            w.disconnectDB()
-                            w.indicator.status = 'disconnected'
-                            w.indicator.repaint()
-                            log('disconnected...')
+                                w.indicator.status = 'disconnected'
+                                w.indicator.repaint()
+                                log('disconnected...')
 
                 # close damn chart console
                 
@@ -860,8 +1068,66 @@ class hslWindow(QMainWindow):
                 
                 # 2022-11-23
                 #self.chartArea.dp = dpDB.dataProvider(conf) # db data provider
-                dp = dpDB.dataProvider(conf) # db data provider
 
+                dpCreationLoop = True
+                while dpCreationLoop:
+                    dpCreationLoop = False # very regular execution
+                    dp = dpDB.dataProvider(conf) # db data provider
+
+                    if hasattr(dp, 'dbProperties'):
+                        if dp.dbProperties.get('error') == 'password reset':
+                            # surrogate connection, forced to change the password (and reconnect)
+
+                            passwordNotOkay = True
+                            dpCreationLoop = True          # okay, we'll need to reconnect
+
+                            while passwordNotOkay:
+
+                                # id = QInputDialog
+                                # newpwd, ok = id.getText(self, 'Password change', 'You have to change initial password:')
+
+                                user = conf.get('user')
+                                pwd = utils.cfgManager.decode(conf['password'])
+                                pwdDiag = pwdDialog(self, user, pwd, 'Change initial password')
+                                rslt = pwdDiag.exec_()
+
+                                if rslt == QDialog.Accepted:
+                                    newpwd = pwdDiag.pwdEdit.text()
+
+                                    try:
+                                        newpwd = utils.pwd_escape(newpwd)
+                                        sql = f'alter user {user} password "{newpwd}"'
+                                        dp.dbi.execute_query_desc(dp.connection, sql, [], 10, noLogging=True)
+
+                                        passwordNotOkay = False
+
+                                    except dbException as e:
+                                        log(f'[e], alter user exception: {e}')
+                                        msgBox = QMessageBox(self)
+                                        msgBox.setWindowTitle('Password update error')
+                                        msgBox.setText(f'Password update failed: {e} ')
+                                        iconPath = resourcePath('ico', 'favicon.png')
+                                        msgBox.setWindowIcon(QIcon(iconPath))
+                                        msgBox.setIcon(QMessageBox.Warning)
+                                        msgBox.exec_()
+                                else:
+                                    deb('abort pwd reset')
+                                    dpCreationLoop = False
+                                    break # cancel -> abandone changing password dialog
+                            else:
+                                log('Okay, seems pwd reset done okay, now need proper DP init', 2)
+                                conf['password'] = utils.cfgManager.encode(newpwd)
+                                if not secondary:
+                                    self.primaryConf['password'] = conf['password']
+                                msgBox = QMessageBox(self)
+                                msgBox.setWindowTitle('Password update ok')
+                                msgBox.setText(f'Password change went fine, but you need to update it manually in connections for future use.')
+                                iconPath = resourcePath('ico', 'favicon.png')
+                                msgBox.setWindowIcon(QIcon(iconPath))
+                                # msgBox.setIcon(QMessageBox.Warning)
+                                msgBox.exec_()
+
+                deb('out of dp creation loop')
                 if hasattr(dp, 'dbProperties'):
                     if dp.dbProperties.get('usage'):
                         usage = dp.dbProperties.get('usage')
@@ -999,6 +1265,16 @@ class hslWindow(QMainWindow):
                 else:
                     log(e)
                     
+                # if e.type == dbException.PWD:
+                #     id = QInputDialog
+                #     newpwd, ok = id.getText(self, 'New password', 'You have to change initial password')
+
+                #     print(conf)
+
+                #     if ok:
+                #         sql = f'alter user {2} password {newpwd}'
+                #         rows = self.dbi.execute_query(self.connection, sql, [])
+
                 msgBox = QMessageBox(self)
                 msgBox.setWindowTitle('Connection error')
                 msgBox.setText('Connection failed: %s ' % (str(e)))
@@ -1123,6 +1399,51 @@ class hslWindow(QMainWindow):
         
         return console
         
+    def menuPassword(self):
+
+        conf = self.primaryConf
+
+        if not conf:
+            utils.msgDialog('Not connected', 'It seems you are not connected to the db, no password change possible.', self)
+            return
+
+        if len(self.chartArea.ndp) > 1:
+            utils.msgDialog('Too complex', 'Seems you are using several connections at the moment, password change only supported for a single connection, sorry.', self)
+            return
+
+        dp = self.chartArea.ndp[0]
+
+        user = conf.get('user')
+        pwd = conf.get('password')
+
+        if not user or not pwd:
+            utils.msgDialog('Error', 'Some user/pwd error, sorry.', self)
+            return
+
+        pwd = utils.cfgManager.decode(pwd)
+
+        pwdDiag = pwdDialog(self, user, pwd)
+        rslt = pwdDiag.exec_()
+
+        if rslt != QDialog.Accepted:
+            log('password change aborted', 4)
+            return
+
+        pwd = pwdDiag.pwdEdit.text()
+
+        try:
+            pwd = utils.pwd_escape(pwd)
+            sql = f'alter user {user} password "{pwd}"'
+            dp.dbi.execute_query_desc(dp.connection, sql, [], 10, noLogging=True)
+        except dbException as e:
+            log(f'[e], pwd change exception: {e}')
+            utils.msgDialog('Password Error', str(e), self)
+        else:
+            log('Pwd change done fine')
+            utils.msgDialog('Password Ok', 'Password accepted, but don\'t forget to update your connections file manually.', self)
+
+            conf['password'] = utils.cfgManager.encode(pwd)
+
     def menuOpen(self):
         '''
             so much duplicate code with menuSqlConsole
@@ -1382,6 +1703,12 @@ class hslWindow(QMainWindow):
             
             self.chartArea.reloadChart()
 
+    def menuDevFromto(self):
+        self.chartArea.fromEdit.setText('2023-10-28 22:00:00')
+        self.chartArea.toEdit.setText('2023-10-29 08:10:00')
+
+        self.chartArea.reloadChart()
+
     def menuSQLToolbar(self):
         state = self.tbAct.isChecked()
         if state:
@@ -1517,7 +1844,6 @@ class hslWindow(QMainWindow):
         self.kpisTable = kpiTable.kpiTable()
         kpisTable = self.kpisTable
 
-
         # top (main chart area)
         self.chartArea = chartArea.chartArea()
 
@@ -1590,6 +1916,7 @@ class hslWindow(QMainWindow):
             self.kpiSplitter.setSizes([200, 380])
             
         
+        presetsDialog.presets = presetsDialog.Presets()
         self.mainSplitter.setAutoFillBackground(True)
 
         # central widget
@@ -1648,6 +1975,10 @@ class hslWindow(QMainWindow):
         openAct.setStatusTip('Open new console with the file')
         openAct.triggered.connect(self.menuOpen)
 
+        pwdAct = QAction('Change DB password', self)
+        pwdAct.setStatusTip('Change users password')
+        pwdAct.triggered.connect(self.menuPassword)
+
         saveAct = QAction('&Save sql to a file', self)
         saveAct.setShortcut('Ctrl+S')
         saveAct.setStatusTip('Saves sql from current console to a file')
@@ -1664,6 +1995,7 @@ class hslWindow(QMainWindow):
         
         fileMenu.addAction(sqlConsAct)
         fileMenu.addAction(openAct)
+        fileMenu.addAction(pwdAct)
         
         fileMenu.addAction(saveAct)
         
@@ -1722,9 +2054,29 @@ class hslWindow(QMainWindow):
         layoutAct.triggered.connect(self.menuLayoutRestore)
         
         layoutMenu.addAction(layoutAct)
+        layoutMenu.addSeparator()
             
-        # issue #255
+        kpisSave = QAction('Save KPIs Preset', self)
+        kpisSave.setStatusTip('Save currently enabled KPIs to quickly restore later')
+        kpisSave.setShortcut('Alt+P')
+        kpisSave.triggered.connect(self.menuKPIsSave)
+        layoutMenu.addAction(kpisSave)
+
+        presetsManage = QAction('Manage presets', self)
+        presetsManage.triggered.connect(self.menuPresersManage)
+        layoutMenu.addAction(presetsManage)
+
+        # kpisRestore = QAction('Restore KPIs', self)
+        # kpisRestore.setStatusTip('Restores KPIs saved with "Save selected KPIs" option')
+        # kpisRestore.triggered.connect(self.menuKPIsRestore)
+        # layoutMenu.addAction(kpisRestore)
+
+        self.presetsSubMenu = layoutMenu.addMenu('Presets')
+
+        self.menuPresetPopulate()
+
         reloadConfigAct = QAction('Reload &Config', self)
+        # issue #255
         reloadConfigAct.setStatusTip('Reload configuration file. Note: some values used during the connect or other one-time-actions (restart required).')
         reloadConfigAct.triggered.connect(self.menuReloadConfig)
         actionsMenu.addAction(reloadConfigAct)
@@ -1741,6 +2093,14 @@ class hslWindow(QMainWindow):
         reloadCustomKPIsAct.triggered.connect(self.menuReloadCustomKPIs)
 
         actionsMenu.addAction(reloadCustomKPIsAct)
+
+        if cfg('dev') and False:
+            devMenu = menubar.addMenu('DEV')
+            fromtoAct = QAction('set TZ test timestamps', self)
+            fromtoAct.setShortcut('Ctrl+Shift+T')
+            fromtoAct.triggered.connect(self.menuDevFromto)
+            devMenu.addAction(fromtoAct)
+
 
         self.colorizeAct = QAction('Colorize KPIs', self)
         self.colorizeAct.setStatusTip('Ignore standard KPI styles and use raduga colors instead')
@@ -1764,6 +2124,14 @@ class hslWindow(QMainWindow):
         self.tzAct.triggered.connect(self.menuTZ)
 
         actionsMenu.addAction(self.tzAct)
+
+
+        if cfg('experimental') or True:
+            hlAct = QAction('Reload highlights', self)
+            hlAct.setStatusTip('Reload highlights definition from highlight folder')
+            hlAct.triggered.connect(self.menuHighlights)
+
+            actionsMenu.addAction(hlAct)
 
         self.essAct = QAction('Switch to ESS load history', self)
         self.essAct.setStatusTip('Switches from online m_load_history views to ESS tables')

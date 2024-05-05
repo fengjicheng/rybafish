@@ -75,6 +75,7 @@ class myWidget(QWidget):
     highlightedKpiHost = None # host for currently highlihed kpi
     
     highlightedPoint = None #point currently highlihed (currently just one)
+    highlightedNormVal = None
     
     highlightedGBI = None # multiline groupby index 
     
@@ -108,7 +109,7 @@ class myWidget(QWidget):
     
     y_delta = 0 # to make drawing space even to 10 parts (calculated in drawGrid)
     
-    delta = 0 # offset for uneven time_from values
+    delta = 0 # offset for uneven time_from values: gap from start of the grid to time_from
     
     zoomLock = False # also used in scrollRangeChanged
     paintLock = False
@@ -127,7 +128,9 @@ class myWidget(QWidget):
     gotGantt = False # True if there is any gantt on the chart (screen window only)
     
     timeScale = ''
-        
+    tzChangeWarning = False
+
+
     def __init__(self):
         super().__init__()
         
@@ -137,6 +140,8 @@ class myWidget(QWidget):
         if cfg('fontSize') is not None:
             self.conf_fontSize = cfg('fontSize')
             
+        self.tzInfo = None
+
         self.calculateMargins()
         
         self.initPens()
@@ -191,9 +196,8 @@ class myWidget(QWidget):
         myFont = QFont ('SansSerif', self.conf_fontSize)
         fm = QFontMetrics(myFont)
         
-        self.font_height = scale * fm.height() - 2 # too much space otherwise
-        
-        self.bottom_margin = self.font_height*2 + 2 + 2
+        self.font_height = int(scale * fm.height()) - 2 # too much space otherwise
+        self.bottom_margin = int(self.font_height*2) + 2 + 2
         
         log('font_height: %i' %(self.font_height))
         log('bottom_margin: %i' %(self.bottom_margin))
@@ -400,7 +404,7 @@ class myWidget(QWidget):
                             yScaleLow = min_value             # 2022-01-19  #562
                             yScale = max_value                # 2021-07-15, #429 
                             max_value_n = kpiDescriptions.normalize(kpiStylesNNN[kpi], max_value) #429
-                            
+
                             manualScale = True
                         else:
                             max_value = groupMax[groupName]
@@ -451,10 +455,26 @@ class myWidget(QWidget):
                     
                     dUnit = kpiStylesNNN[kpi]['sUnit'] # not converted
 
+                    # whole sUnit/dUnit logic lost here...
                     if max_value_n == max_value:
-                        dUnit = kpiStylesNNN[kpi]['sUnit'] # not converted
+                        # normalized same as not normalized... 0?
+                        deb(f'{kpi} dUnit = sUnit due to max_value_n == max_value: {max_value_n} == {max_value}')
+                        deb(f'{kpi}, {manualScale=}')
+
+                        if manualScale:
+                            deb('dUnit due to manualScale')
+                            dUnit = kpiStylesNNN[kpi]['dUnit']
+                        else:
+
+                            if max_value_n == 0: #cfg('sunit_debug', False):
+                                deb('set to dUnit as max_value = 0')
+                                dUnit = kpiStylesNNN[kpi]['dUnit'] # not converted
+                            else:
+                                deb('set to sUnit as not zero and manual scale')
+                                dUnit = kpiStylesNNN[kpi]['sUnit'] # not converted
+
                     else:
-                        max_value_n = self.ceiling(max_value_n) # normally it's already aligned inside getMaxSmth
+                        # max_value_n = self.ceiling(max_value_n) # normally it's already aligned inside getMaxSmth
                         dUnit = kpiStylesNNN[kpi]['dUnit'] # converted
                     
                     scaleKpi['yScale'] = yScale
@@ -529,19 +549,19 @@ class myWidget(QWidget):
         if self.legend:
             cmenu.addSeparator()
             copyLegend = cmenu.addAction('Copy Legend to clipboard')
-            putLegend = cmenu.addAction('Hide Legend')
+            putLegend = cmenu.addAction('Hide Legend\tCtrl+L')
 
         else:
             cmenu.addSeparator()
-            putLegend = cmenu.addAction('Show Legend')
+            putLegend = cmenu.addAction('Show Legend\tCtrl+L')
         
         if self.gotGantt:
             cmenu.addSeparator()
             
             if self.hideGanttLabels:
-                toggleGanttLabels = cmenu.addAction('Show Gantt Labels')
+                toggleGanttLabels = cmenu.addAction('Show Gantt Labels\tCtrl+Shift+L')
             else:
-                toggleGanttLabels = cmenu.addAction('Hide Gantt Labels')
+                toggleGanttLabels = cmenu.addAction('Hide Gantt Labels\tCtrl+Shift+L')
         
         if self.highlightedEntity is not None:
             copyGanttEntity = cmenu.addAction('Copy highlighted gantt entity')
@@ -604,8 +624,6 @@ class myWidget(QWidget):
             self.statusMessage('Legend bitmap copied to the clipboard')
         
         if action == putLegend:
-            #self.legend = not self.legend
-            
             if self.legend is None:
                 self.legend = 'hosts'
             else:
@@ -687,6 +705,17 @@ class myWidget(QWidget):
             host = self.highlightedKpiHost
             gb = self.highlightedGBI
             
+            kpiStylesNNN = self.hostKPIsStyles[host]
+            subtype =  kpiStylesNNN[kpi].get('subtype')
+
+            if subtype != 'multiline':
+                log('[W] unexpected multiline call while not multiline?', 1)
+                return
+
+            if kpi not in self.ndata[host]:
+                log(f'[w] kpi is not there? ({kpi})', 2)
+                return
+
             gbv = self.ndata[host][kpi][gb][0]
             
             clipboard = QApplication.clipboard()
@@ -699,6 +728,10 @@ class myWidget(QWidget):
             kpi = self.highlightedKpi
             host = self.highlightedKpiHost
             range_i = self.highlightedRange
+
+            if kpi not in self.ndata[host]:
+                log(f'[w] kpi is not there? ({kpi})', 2)
+                return
 
             if entity in self.ndata[host][kpi]:
             
@@ -807,8 +840,11 @@ class myWidget(QWidget):
 
         for kpi in kpis:
         
-            #log('', 5)
-            #log('scanForHint kpi: %s' %(kpi), 5)
+            log('scanForHint kpi: %s' %(kpi), 5)
+
+            if not kpi in scales:
+                log(f'[w] kpi {kpi} not in scales, skip', 2)
+                continue
         
             if kpi[:4] == 'time':
                 continue
@@ -1018,7 +1054,6 @@ class myWidget(QWidget):
                 #y = self.nscales[h][kpi]['y_min'] + y*y_scale #562
                 #y = (y - self.nscales[h][kpi]['y_min']) * y_scale #562
 
-
                 ymin = y_min
                 #ymin = scales[kpi]['y_min'] + ymin*y_scale                     #562
                 ymin = (ymin - scales[kpi]['y_min']) *y_scale                   #562
@@ -1041,7 +1076,17 @@ class myWidget(QWidget):
                 if pos.y() <= ymin + tolerance and pos.y() >= ymax - tolerance: #it's reversed in Y calculation...
                     if (self.highlightedKpi):
                     
-                        if self.highlightedKpi == kpi and self.highlightedKpiHost == host:
+                        # if self.highlightedKpi == kpi and self.highlightedKpiHost == host:
+                        # deb(f'{kpi=}')
+                        # deb(kpiStylesNNN[kpi])
+                        # deb(f'{self.highlightedKpi=}')
+
+                        hlStyle = self.hostKPIsStyles[self.highlightedKpiHost][self.highlightedKpi]
+                        # deb(hlStyle)
+
+                        if kpiStylesNNN[kpi]['group'] == hlStyle['group']:
+                            # print(kpi, kpiStylesNNN[kpi])
+                            # print(kpi, kpiStylesNNN[self.highlightedKpi])
                             reportDelta = True
                             
                         self.highlightedKpi = None
@@ -1072,14 +1117,25 @@ class myWidget(QWidget):
                         self.highlightedRange = None
                     
                     if reportDelta:
-                        deltaVal = normVal - self.highlightedNormVal
-                        deltaVal = ', delta: ' + utils.numberToStr(abs(deltaVal), d)
+                        if self.highlightedNormVal is None:
+                            deltaVal = ''
+                        else:
+                            deltaVal = normVal - self.highlightedNormVal
+                            deltaVal = ', delta: ' + utils.numberToStr(abs(deltaVal), d)
                     else:
                         deltaVal = ''
 
                     self.highlightedNormVal = normVal
                         
-                    tm = datetime.datetime.fromtimestamp(data[timeKey][j]).strftime('%Y-%m-%d %H:%M:%S')
+                    if utils.cfg_servertz:
+                        # dpidx = self.hosts[host]['dpi']
+                        # utcOff = self.ndp[dpidx].dbProperties.get('utcOffset', 0)
+                        # ts = datetime.datetime.fromtimestamp(data[timeKey][j], utils.getTZ(utcOff))
+                        ts = datetime.datetime.fromtimestamp(data[timeKey][j], self.tzInfo)
+                    else:
+                        ts = datetime.datetime.fromtimestamp(data[timeKey][j])
+
+                    tm = ts.strftime('%Y-%m-%d %H:%M:%S')
                     
                     self.statusMessage('%s, %s%s = %s %s at %s%s' % (hst, kpi, ml, scaled_value, scales[kpi]['unit'], tm, deltaVal))
                     
@@ -1150,14 +1206,14 @@ class myWidget(QWidget):
             kpiStylesNNN = self.hostKPIsStyles[h]
             
             dbinfo = ''
-            
+
             if 'db' in self.hosts[h] and 'service' in self.hosts[h] and hostType == 'service':
 
-                if cfg('legendTenantName'):
-                    dbinfo += self.hosts[h]['db'] + ' '
+                if cfg('legendTenantName') and self.hosts[h].get('db'):
+                    dbinfo += self.hosts[h].get('db', '') + ' '
 
-                if cfg('legendServiceName'):
-                    dbinfo += self.hosts[h]['service']
+                if cfg('legendServiceName') and self.hosts[h].get('service'):
+                    dbinfo += self.hosts[h].get('service', '')
                     
             if dbinfo != '':
                 dbinfo = ', ' + dbinfo
@@ -1465,7 +1521,7 @@ class myWidget(QWidget):
             drawStep = timeStep*x_scale + 2
             
             i = -1
-            
+
             while i < array_size-1:
                 i+=1
                 #log(self.data['time'][i])
@@ -1476,7 +1532,10 @@ class myWidget(QWidget):
                     continue
                     
                 x = (time_array[i] - from_ts) # number of seconds
-                x = self.side_margin + self.left_margin +  x * x_scale
+                x = self.side_margin + self.left_margin + x * x_scale
+
+                # if i > 0:
+                #     deb(f'calculated x value is: ({(time_array[i] - from_ts) - (time_array[i-1] - from_ts)}): {x}')
 
                 if x < startX - drawStep or x > stopX + drawStep:
                     
@@ -1626,6 +1685,12 @@ class myWidget(QWidget):
                         gradient = True
                     else:
                         gradient = False
+
+                    if kpiStylesNNN[kpi].get('manual_color'):
+                        manual_color = True
+                    else:
+                        manual_color = False
+
                 else:
                     gantt = False
                 
@@ -1752,6 +1817,18 @@ class myWidget(QWidget):
                                         rgb = adjustGradient(ganttBaseColor, ganttFadeColor, bv)
                                         qp.setBrush(rgb)
                                     
+                                if manual_color:
+                                    clr = t[5]
+
+                                    if clr:
+                                        rgb = QColor(clr)
+                                    else:
+                                        rgb = ganttBaseColor
+
+
+                                    qp.setBrush(rgb)
+
+
                                     #rgb = QColor(clr.red()*0.75, clr.green()*0.75, clr.blue()*0.75)
                                     #qp.setPen(QPen(rgb))
 
@@ -1860,6 +1937,11 @@ class myWidget(QWidget):
                 array_size = len(self.ndata[h][timeKey])
                 time_array = self.ndata[h][timeKey]
 
+                if cfg('dev__'):
+                    for i in range(len(time_array)):
+                        if i > 0:
+                            deb(f'{i:3} time delta: {time_array[i] - time_array[i-1]}')
+
                 if utils.cfg('colorize'):
                     radugaSize = len(kpiDescriptions.radugaPens)
                     kpiPen = kpiDescriptions.radugaPens[raduga_i % radugaSize]
@@ -1967,17 +2049,18 @@ class myWidget(QWidget):
         
         t_scale = self.t_scale  # seconds in one grid cell, based on zoom: '4 hours' = 4*3600
 
+        deb(f't_to: {self.t_to}')
+        deb(f't_from: {self.t_from}')
         seconds = (self.t_to - self.t_from).total_seconds()
         
         qp.setPen(self.gridColor)
 
-        # vertical scale
-        
+        # vertical scale lines
         for j in range(1,10):
             y = top_margin + j * y_step
             
             if j == 5:
-                qp.setPen(self.gridColorMj) #50% CPU line
+                qp.setPen(self.gridColorMj) #50% line
             
             qp.drawLine(self.side_margin + self.left_margin + 1, y, wsize.width()-self.side_margin - 1, y)
             
@@ -1985,21 +2068,33 @@ class myWidget(QWidget):
                 qp.setPen(self.gridColor)
         
         #x is in pixels
-        x = self.side_margin + self.left_margin +self.step_size
+        x = self.side_margin + self.left_margin + self.step_size
 
-        #have to align this to have proper marks
+        # now have to align this to have proper marks
+
+        # this is where the confusion is coming from t_from is in local timestamp
+        # but we hope it to be in system TZ...
         
-        log(f'{t_scale=}', component='grid_tz')
-        self.delta = self.t_from.timestamp() % t_scale
+        tsfix = self.t_from.replace(tzinfo=self.tzInfo)
+        self.delta = tsfix.timestamp() % t_scale # delta from start of the grid to time_from
 
-        if not cfg('bug795', False):        # lol, seems a bug indeed, #866
+        log(f'{t_scale=}', component='tz')
+        log(f'delta calculation, {self.t_from.timestamp()}%{t_scale} = {self.delta}', component='tz')
+        log(f'from: {self.t_from.timestamp()}', component='tz')
+
+        if not cfg('bug795', False) and False:        # lol, seems a bug indeed, #866
             if t_scale == 60*60*4 or True:
-                tzCalc = datetime.datetime.strptime('2023-09-03 00:00:00', '%Y-%m-%d %H:%M:%S')
+                # tzCalc = datetime.datetime.strptime('2023-09-03 00:00:00', '%Y-%m-%d %H:%M:%S')
+                # tzCalc = datetime.datetime.combine(datetime.date.today(), datetime.time(0,0,0))
+                tzCalc = datetime.datetime.combine(self.t_from.date(), datetime.time(0,0,0))
                 tzGridCompensation = tzCalc.timestamp() % (24*3600) % t_scale
-                log(f'{tzGridCompensation=}', component='grid_tz')
+                log(f'timestamp: {tzCalc=}', component='tz')
+                log(f'timestamp: {tzCalc.timestamp()}', component='tz')
+                log(f'{self.delta=}', component='tz')
+                log(f'{tzGridCompensation=}', component='tz')
                 self.delta -= tzGridCompensation    # not sure, could be a bug (what if negative?)
-                log(f'{self.delta=}', component='grid_tz')
-        
+                log(f'{self.delta=}', component='tz')
+
         bottom_margin = self.bottom_margin
         side_margin = self.side_margin
         delta = self.delta
@@ -2017,8 +2112,19 @@ class myWidget(QWidget):
                 
             qp.drawLine(x, top_margin + 1, x, wsize.height() - bottom_margin - 2)
             
+            # c_time = self.t_from + datetime.timedelta(seconds=(x - side_margin - self.left_margin)/self.step_size*t_scale - delta)
             c_time = self.t_from + datetime.timedelta(seconds=(x - side_margin - self.left_margin)/self.step_size*t_scale - delta)
-            
+
+            if False:
+                log(f'grid time: {c_time}', component='tz')
+                # tzCalc = datetime.datetime.combine(self.t_from.date(), datetime.time(0,0,0))
+                # tzGridCompensation = tzCalc.timestamp() % (24*3600) % t_scale
+                # log(f'timestamp: {tzCalc=}', component='tz')
+                # log(f'timestamp: {tzCalc.timestamp()}', component='tz')
+                # log(f'{tzGridCompensation=}', component='tz')
+                # self.delta -= tzGridCompensation    # not sure, could be a bug (what if negative?)
+                # log(f'{self.delta=}', component='tz')
+
             major_line = False
             date_mark = False
             
@@ -2058,8 +2164,14 @@ class myWidget(QWidget):
                 hrs_scale = 60*4*3 # god damit, 3, really?
             elif t_scale == 4*3600:
                 min_scale = 60*24
+                hrs_scale = 60*24*2
+            elif t_scale == 8*3600:
+                min_scale = 3600*24*2
                 hrs_scale = 60*24*4
-                
+            elif t_scale == 12*3600:
+                min_scale = 3600*24*2
+                hrs_scale = 60*24*4
+
             # number of minutes since the grid start
             min = int(c_time.strftime("%H")) *60 + int(c_time.strftime("%M"))
 
@@ -2072,11 +2184,17 @@ class myWidget(QWidget):
             elif min % min_scale == 0:
                 major_line = True
                 
-                if min % hrs_scale == 0:
-                    date_mark = True
-                    
+                if hrs_scale <= 60*24:
+                    if min % hrs_scale == 0:
+                        date_mark = True
+                else:
+                    if min == 0:
+                        day = int(c_time.strftime("%d"))
+                        if day % (hrs_scale/60/24) == 1:
+                            date_mark = True
+
             ct = c_time.strftime('%Y-%m-%d %H:%M:%S')
-            log(f'{ct=}, {min=}, {major_line=}', component='grid_tz')
+            # log(f'{ct=}, {min=}, {major_line=}', component='tz')
 
             if major_line:
             
@@ -2092,8 +2210,10 @@ class myWidget(QWidget):
                  
                 # #587
                                 
-                qp.drawText(int(x-label_width), wsize.height() - bottom_margin + self.font_height, label)
-                
+                if t_scale < 8*3600 or date_mark:
+                    # print(wsize.height(), bottom_margin, self.font_height, label)
+                    qp.drawText(int(x-label_width), wsize.height() - bottom_margin + self.font_height, label)
+
                 if date_mark:
                     label = c_time.strftime('%Y-%m-%d')
                     qp.drawText(int(x-self.font_width3), int(wsize.height() - bottom_margin + self.font_height*2), label)
@@ -2121,7 +2241,58 @@ class myWidget(QWidget):
         self.drawChart(qp, startX, stopX)
         
         qp.end()
+
+
+    def toggleGanttLabels(self):
+        if self.hideGanttLabels:
+            self.hideGanttLabels = False
+        else:
+            self.hideGanttLabels = True
+
+        self.repaint()
         
+    def toggleLegend(self):
+        if self.legend is None:
+            self.legend = 'hosts'
+        else:
+            self.legend = None
+        self.repaint()
+        
+    def checkDayLightSaving(self):
+        '''
+        Checks if there is a DL saving occured during the from-to period
+        Displays a stupid warning if yes
+
+        '''
+        log(f'okay, check daylight, {self.tzChangeWarning=}, bug920={cfg("bug920")}', component='daylight')
+        if self.tzChangeWarning == False and cfg('bug920', False) == False:
+            date_from = self.t_from.date()
+            date_to = self.t_to.date()
+            tzCalc = datetime.datetime.combine(date_from, datetime.time(0,0,0))
+            tzCalcTo = datetime.datetime.combine(date_to, datetime.time(0,0,0))
+            tzGridCompensation = tzCalc.timestamp() % (24*3600)
+            tzGridCompensationTo = tzCalcTo.timestamp() % (24*3600)
+            log(f'real check: {tzCalc}, {tzCalcTo}', component='daylight')
+
+            if tzGridCompensation != tzGridCompensationTo and self.tzChangeWarning == False:
+                log('yes, daylight saving change detected...', component='daylight')
+                log('Daylight change detected, display a warning. You can disable this check by setting bug920: True.', 2)
+                title = 'Time zone change warning'
+                message = f'A daylight saving adjustment took place during the period:\n from: {date_from} to: {date_to}\n\nPlease be informed that the data shown on the chart does not factor in this change; it is based on the time zone in the beggining of the period.\n\nAs a result, the data at the end of the period is one hour off.\n\nWe apologize for any confusion and kindly request your support in calling for the discontinuation of daylight saving adjustments as it does not make any sense in 21st Century.\n\nSorry for that, permanent fix is on the way.'
+
+                msgBox = QMessageBox(self)
+                msgBox.setWindowTitle(title)
+                msgBox.setText(message)
+                msgBox.setStandardButtons(QMessageBox.Ok)
+
+                iconPath = resourcePath('ico', 'favicon.png')
+                msgBox.setWindowIcon(QIcon(iconPath))
+                msgBox.setIcon(QMessageBox.Warning)
+
+                reply = msgBox.exec_()
+
+                self.tzChangeWarning = True
+
 
 def moveAsync(direction, d, i):
     '''this one to skip -1s in multiline async'''
@@ -2140,6 +2311,8 @@ def moveAsync(direction, d, i):
             return i
 
     return None
+
+
 
 class chartArea(QFrame):
     
@@ -2304,6 +2477,9 @@ class chartArea(QFrame):
 
             idx = None
 
+            if kpi not in data:
+                return None, None
+
             if gbi is None:
                 dataArray = data[kpi]
             else:
@@ -2367,7 +2543,7 @@ class chartArea(QFrame):
             return
 
         pointTime = data[timeKey][point]
-        pointTS = datetime.datetime.fromtimestamp(pointTime)
+        # pointTS = datetime.datetime.fromtimestamp(pointTime)
                 
         # this will be required in messy getY implementation
         wsize = self.widget.size()
@@ -2581,7 +2757,17 @@ class chartArea(QFrame):
         self.widget.highlightedNormVal = normVal
 
         scaled_value = utils.numberToStr(normVal, d)
-        tm = datetime.datetime.fromtimestamp(self.widget.ndata[host][timeKey][point]).strftime('%Y-%m-%d %H:%M:%S')
+
+        # host = self.widget.highlightedKpiHost
+
+        if utils.cfg_servertz:
+            dpidx = self.widget.hosts[host]['dpi']
+            utcOff = self.ndp[dpidx].dbProperties.get('utcOffset', 0)
+            ts = datetime.datetime.fromtimestamp(self.widget.ndata[host][timeKey][point], utils.getTZ(utcOff))
+        else:
+            ts = datetime.datetime.fromtimestamp(self.widget.ndata[host][timeKey][point])
+
+        tm = ts.strftime('%Y-%m-%d %H:%M:%S')
         
         unit = self.widget.nscales[host][kpi]['unit']
 
@@ -2743,7 +2929,11 @@ class chartArea(QFrame):
         elif event.key() == Qt.Key_End:
             self.scrollarea.horizontalScrollBar().setValue(self.widget.width() - self.width() + 22) # this includes scrollArea margins etc, so hardcoded...
             
-        else: 
+        elif event.key() == Qt.Key_L and modifiers == Qt.ControlModifier:
+            self.widget.toggleLegend()
+        elif event.key() == Qt.Key_L and modifiers & Qt.ControlModifier and modifiers & Qt.ShiftModifier:
+            self.widget.toggleGanttLabels()
+        else:
             super().keyPressEvent(event)
 
     def cleanup(self):
@@ -2877,7 +3067,7 @@ class chartArea(QFrame):
         self.repaint()
         
         try:
-            newHosts, newKPIs, newStyles, errStr = dp.initHosts(dpidx)
+            newHosts, newKPIs, newStyles, err = dp.initHosts(dpidx)
 
             # append hosts, not replace if that would be requred, hosts would be cleared above
             for h in newHosts:
@@ -2889,11 +3079,27 @@ class chartArea(QFrame):
             for styles in newStyles:
                 self.hostKPIsStyles.append(styles.copy())      # create a corresponding list of KPIs
 
-            if errStr:
+            if err is not None:
+
+                if type(err) == tuple: # modern error provider
+                    eType = err[0]
+                    errStr = err[1]
+                else:
+                    eType = 'customKPI'
+                    errStr = err
+
                 log('[!] initHosts customKPIException: %s' %  errStr, 2)
-                utils.msgDialog('Custom KPI Error', 'There were errors during custom KPIs load. Load of the custom KPIs STOPPED because of that.\n\n'
-                                + errStr
-                                + '\n\nSee more details in rybafish.log file')
+
+                if eType == 'customKPI':
+                    msgHeader = 'Custom KPI Error'
+                    msgText = 'There were errors during custom KPIs load. Load of the custom KPIs STOPPED because of that.\n\n' + errStr + '\n\nSee more details in rybafish.log file'
+                else:
+                    msgHeader = 'initHosts Error'
+                    msgText = errStr
+
+                if eType:
+                    utils.msgDialog(msgHeader, msgText)
+
         except utils.vrsException as e:
             log('[!] variables processing exception: %s' % (str(e)), 1)
             utils.msgDialog('Initialization Error', 'Variables processing error. Check the variables definition, if the message persists, consider deleting layout.yaml\n\n%s' % (str(e)))
@@ -2939,6 +3145,12 @@ class chartArea(QFrame):
         
         else:
             self.widget.timeZoneDelta = 0
+
+        if utils.cfg_servertz:
+            utcOffset = dp.dbProperties.get('utcOffset', 0)
+            self.widget.tzInfo = utils.getTZ(utcOffset)
+
+            log(f'Chart tzInfo set to UTC +{utcOffset}', 2)
             
         self.hostsUpdated.emit()
         
@@ -3024,12 +3236,16 @@ class chartArea(QFrame):
         self.widget.update()
         
         
-    def connectionLost(self, dp, err_str = ''):
+    def connectionLost(self, dp, err_str='', nodialog=False):
         '''
             very synchronous call, it holds controll until connection status resolved
         '''
         self.statusMessage('Connection error (%s)' % err_str, True)
-        
+
+        if nodialog:
+            log('connection lost, but we cannot block UI thread, so silently exit', 2)
+            return False
+
         msgBox = QMessageBox(self)
         msgBox.setWindowTitle('Charts connection lost')
         msgBox.setText('Connection failed, reconnect?')
@@ -3119,10 +3335,20 @@ class chartArea(QFrame):
                 try:
                     t0 = time.time()
                     
-                    log('need to check here if all the kpis actually exist...')
-                    log(str(host))
-                    log(str(kpis))
+                    log('request kpis: need to check here if all the kpis actually exist...')
+                    log(f'host: {host}')
+                    log(f'kpis: {kpis}')
                     
+                    kpiStylesNNN = self.hostKPIsStyles[host]
+
+                    for k in self.widget.nkpis[host]:
+                        log(f'kpi: {k}')
+                        if k not in kpiStylesNNN:
+                            log('[!] okay, %s does not exist anymore, so deleting it from the list...' % k)
+                            self.widget.nkpis[host].remove(k)
+                        else:
+                            log('ok')
+
                     dp.getData(self.widget.hosts[host], fromto, kpis, self.widget.ndata[host], self.hostKPIsStyles[host], wnd=self)
                     self.widget.nkpis[host] = kpis
                     
@@ -3170,12 +3396,21 @@ class chartArea(QFrame):
                         if cfg('loglevel', 3) > 3:
                             log('unclick, %s, %s:' % (str(hst), kpi))
                             log('kpis before unclick: %s' % (self.widget.nkpis[hst]))
+
+                        if self.widget.highlightedKpiHost == hst and self.widget.highlightedKpi == kpi:
+                            log('clean up highlightinh #1 (massive)', 4)
+                            self.widget.highlightedKpi = None
+                            self.widget.highlightedKpiHost = None
+                            self.widget.highlightedEntity = None
+
                         if kpi in self.widget.nkpis[hst]:
                             self.widget.nkpis[hst].remove(kpi)
-                            
+                            log(f'delete {kpi} from nkpis list for {hst}', 4)
+
                             if kpi in self.widget.ndata[hst]: #might be empty for alt-added (2019-08-30)
+                                log(f'delete {kpi} data from {hst}', 4)
                                 del(self.widget.ndata[hst][kpi])
-                                
+
                         log('kpis after unclick: %s' % (self.widget.nkpis[hst]), 4)
                         log('data keys: %s' % str(self.widget.ndata[hst].keys()), 4)
                         
@@ -3183,7 +3418,13 @@ class chartArea(QFrame):
                 if cfg('loglevel', 3) > 3:
                     log('unclick, %s, %s:' % (str(host), kpi))
                     log('kpis before unclick: %s' % (self.widget.nkpis[host]))
-                
+
+                if self.widget.highlightedKpiHost == host and self.widget.highlightedKpi == kpi:
+                    log('clean up highlightinh #2', 4)
+                    self.widget.highlightedKpi = None
+                    self.widget.highlightedKpiHost = None
+                    self.widget.highlightedEntity = None
+
                 self.widget.nkpis[host].remove(kpi) # kpis is a list
                 if kpi in self.widget.ndata[host]: #might be empty for alt-added
                     del(self.widget.ndata[host][kpi]) # ndata is a dict
@@ -3309,7 +3550,7 @@ class chartArea(QFrame):
         #print('also stop keep-alive timer here ((it will be kinda refreshed in get_data renewKeepAlive))')
         
         log('trigger auto refresh...')
-        self.reloadChart()
+        self.reloadChart(autorefresh=True)
         
         if self.timer: # need to check as it might be disabled inside reloadChart()
             self.timer.start(1000 * self.refreshTime)
@@ -3395,9 +3636,6 @@ class chartArea(QFrame):
         
         self.widget.resizeWidget()
         
-        # force move it to the end
-        # self.scrollarea.horizontalScrollBar().setValue(self.widget.width() - self.width() + 22)
-        
         self.widget.update()
         
         
@@ -3446,6 +3684,8 @@ class chartArea(QFrame):
             for kpi in data.keys():
                 scales[kpi] = {}
                 
+            log(f'data keys: {data.keys()}', 4)
+            log(f'scales keys: {scales.keys()}', 4)
             #init zero max
             
             for kpi in data.keys():
@@ -3476,13 +3716,16 @@ class chartArea(QFrame):
                         
                     scales[kpi]['entities'] = eNum
                     scales[kpi]['total'] = total
-                    # print ('%i/%i' % (eNum, total))
-                        
+
                     continue
                     
                 timeKey = kpiDescriptions.getTimeKey(kpiStylesNNN, kpi)
                     
                 # array_size = len(self.widget.ndata[h][timeKey]) # 2020-03-11
+
+                if not timeKey in data:
+                    continue
+
                 array_size = len(data[timeKey])
                 
                 if array_size == 0:
@@ -3517,6 +3760,7 @@ class chartArea(QFrame):
                         
                         
                     anti_crash_len = len(scan)
+                    deb(f'anti crash scan, {kpi} -> {anti_crash_len}')
                 
                     try:
                         for i in range(0, array_size):
@@ -3614,6 +3858,7 @@ class chartArea(QFrame):
                 log('timeZoneDelta: %i' % self.widget.timeZoneDelta, 4)
                 starttime = datetime.datetime.now() - datetime.timedelta(seconds= hours*3600 - self.widget.timeZoneDelta)
                 starttime -= datetime.timedelta(seconds= starttime.timestamp() % 3600)
+
                 self.widget.t_from = starttime
                 self.fromEdit.setStyleSheet("color: black;")
             except:
@@ -3622,20 +3867,14 @@ class chartArea(QFrame):
                 return False
         else:
             try:
-                
-                '''
-                if len(fromTime) == 10:
-                    self.widget.t_from = datetime.datetime.strptime(fromTime, '%Y-%m-%d')
-                    
-                    fromTime += ' 00:00:00'
-                    self.fromEdit.setText(fromTime)
-                '''
                 if len(fromTime) >= 10:
                     lt = 19 - len(fromTime)
                     fromTime += ' 00:00:00'[9 - lt:]
                     self.fromEdit.setText(fromTime)
 
-                self.widget.t_from = datetime.datetime.strptime(fromTime, '%Y-%m-%d %H:%M:%S')
+                tfrom = datetime.datetime.strptime(fromTime, '%Y-%m-%d %H:%M:%S')
+
+                self.widget.t_from = tfrom
                     
                 self.fromEdit.setStyleSheet("color: black;")
                 
@@ -3652,10 +3891,10 @@ class chartArea(QFrame):
             try:
                 if len(toTime) == 10:
                     self.widget.t_to = datetime.datetime.strptime(toTime, '%Y-%m-%d')
-                    
+
                     toTime += ' 23:59:59'
                     self.toEdit.setText(toTime)
-                    #self.widget.t_to = datetime.datetime.strptime(toTime, '%Y-%m-%d %H:%M:%S')
+
                 elif len(toTime) > 11 and len(toTime) <19:
                     lt = 19 - len(toTime)
                     toTime += ' 00:00:00'[9 - lt:]
@@ -3668,14 +3907,22 @@ class chartArea(QFrame):
                 self.statusMessage('datetime syntax error')
                 return False
                 
+        if utils.cfg_servertz:
+            log(f'tzinfo update: {self.widget.tzInfo}', component='tz')
+            self.widget.t_from = self.widget.t_from.replace(tzinfo=self.widget.tzInfo)
+            self.widget.t_to = self.widget.t_to.replace(tzinfo=self.widget.tzInfo)
+
         return True
+
                 
-    def reloadChart(self):
+    def reloadChart(self, autorefresh=False):
     
         dp = None
         
         if self.understandTimes() == False:
             return
+
+        # self.widget.checkDayLightSaving()
 
         if not self.ndp:
             self.statusMessage('Not connected to the DB', True)
@@ -3718,8 +3965,9 @@ class chartArea(QFrame):
                         
                         kpiStylesNNN = self.hostKPIsStyles[host]
                         
+                        log(f'nkpis for host {host}: {self.widget.nkpis[host]}')
                         for k in self.widget.nkpis[host]:
-                            log(k)
+                            log(f'kpi: {k}')
                             if k not in kpiStylesNNN:
                                 log('[!] okay, %s does not exist anymore, so deleting it from the list...' % k)
                                 self.widget.nkpis[host].remove(k)
@@ -3737,14 +3985,20 @@ class chartArea(QFrame):
 
             except utils.dbException as e:
                 self.setStatus('error', True)
-                reconnected = self.connectionLost(dp, str(e))
-                
+
+                # modal dialog only possible if autorefresh consoles do not need reconnect themselves
+                if autorefresh and cfg('reconnectTimer'):
+                    reconnected = self.connectionLost(dp, str(e), nodialog=True)
+                else:
+                    reconnected = self.connectionLost(dp, str(e), nodialog=False)
+
                 if reconnected == False:
                     log('reconnected == False')
-                    self.setStatus('sync', True)
                     allOk = False
                     timerF = False
                     self.refreshCB.setCurrentIndex(0) # will disable the timer on this change
+                    self.setStatus('disconnected', True)
+                    self.statusMessage(f'Chart Disconnected: {e}...')
 
         self.renewMaxValues()
         
@@ -3779,13 +4033,15 @@ class chartArea(QFrame):
                 timerF = False
                 
         else:
-            self.statusMessage('Ready')
+            if allOk:
+                self.statusMessage('Ready')
         
         if timerF == True and self.timer is not None:
             self.timer.start(1000 * self.refreshTime)
             self.setStatus('autorefresh', True)
         else:
-            self.setStatus('idle', True)
+            if allOk:
+                self.setStatus('idle', True)
 
         self.reloadLock = False
 
@@ -3811,7 +4067,7 @@ class chartArea(QFrame):
     def adjustScale(self, scale = 1):
         font = self.fromEdit.font()
         fm = QFontMetrics(font)
-        fromtoWidth = scale * fm.width(' 2019-06-17 22:59:00 ') #have no idea why spaces required...
+        fromtoWidth = int(scale * fm.width(' 2019-06-17 22:59:00 ')) #have no idea why spaces required...
 
         self.fromEdit.setFixedWidth(fromtoWidth);
         self.toEdit.setFixedWidth(fromtoWidth);
@@ -3855,11 +4111,11 @@ class chartArea(QFrame):
         self.widget.timeZoneDelta = mintz
 
     def adjustTimeZones(self, dpidx):
-        print(f'Got TZ change request: {dpidx}')
+        log(f'Got TZ change request: {dpidx}', 4)
         dp = self.ndp[dpidx]
 
         if hasattr(dp, 'dbProperties'):
-            print(dp.dbProperties)
+            log(dp.dbProperties, 4)
 
         tzd = tzDialog(self, self.ndp)
         res = tzd.exec_()
@@ -3915,13 +4171,18 @@ class chartArea(QFrame):
         self.scaleCB.addItem('30 minutes')
         self.scaleCB.addItem('1 hour')
         self.scaleCB.addItem('4 hours')
-        
+
+        if cfg('experimental'):
+            self.scaleCB.addItem('8 hours')
+            self.scaleCB.addItem('12 hours')
+
         self.scaleCB.setFocusPolicy(Qt.ClickFocus)
         
+
         self.scaleCB.setCurrentIndex(4)
-        
+
         self.scaleCB.currentIndexChanged.connect(self.scaleChanged)
-        
+
         self.refreshCB = QComboBox()
         
         self.refreshCB.addItem('none')
@@ -3948,8 +4209,11 @@ class chartArea(QFrame):
         starttime -= datetime.timedelta(seconds= starttime.timestamp() % 3600)
                 
         self.fromEdit = QLineEdit(starttime.strftime('%Y-%m-%d %H:%M:%S'))
-        
         self.toEdit = QLineEdit()
+
+        if cfg('dev?') and False:
+            self.fromEdit.setText('2023-10-29 20:00:00')
+            self.toEdit.setText('2023-10-30 12:00:00')
 
         # set from/to editboxes width
         self.adjustScale()
@@ -4001,6 +4265,8 @@ class chartArea(QFrame):
         lo.addWidget(self.scrollarea)
         
         self.widget = myWidget()
+
+        # self.widget.ndp = self.ndp
         
         self.widget._parent = self
         self.widget.hostKPIsStyles = self.hostKPIsStyles        # need to link as used widely in drawChart called from paint event

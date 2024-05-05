@@ -675,12 +675,16 @@ class SQLBrowserDialog(QDialog):
         
     def restoreLayout(wnd):
         if SQLBrowserDialog.layout:
+            x = SQLBrowserDialog.layout.get('pos_x')
+            y = SQLBrowserDialog.layout.get('pos_y')
             width = SQLBrowserDialog.layout.get('width', 600)
             height = SQLBrowserDialog.layout.get('height', 600)
             
-            x = SQLBrowserDialog.layout.get('pos_x')
-            y = SQLBrowserDialog.layout.get('pos_y')
-            
+            if QApplication.desktop().screenCount() == 1:
+                r = QRect(x, y, width, height)
+                if not QApplication.desktop().screenGeometry().contains(r) and not cfg('dontAutodetectScreen'):
+                    (x, y) = (200, 100)
+
             wnd.resize(width, height)
             wnd.move(x, y)
 

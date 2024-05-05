@@ -80,10 +80,13 @@ def colorsHTML(colors):
     d = {}
     
     for key, value in colors.items():
-        v = value[0]*256*256 + value[1]*256 + value[2]
-        
-        d[key] = '#' + hex(v)[2:]
-    
+        # v = value[0]*256*256 + value[1]*256 + value[2]
+        # d[key] = '#' + hex(v)[2:]
+
+        r, g, b = value[0], value[1], value[2]
+        d[key] = f'#{r:02x}{g:02x}{b:02x}'
+
+
     return d
     
 
@@ -95,12 +98,16 @@ def colorsHTMLinit(colors):
     for key, value in colors.items():
         
         v = value.lstrip('#')
+
+        if len(v) != 6:
+            log(f'invalid color, cannot be decoded: "{v}"', 2) # #948
+            continue
+
         r = int(v[0:2], 16)
         g = int(v[2:4], 16)
         b = int(v[4:6], 16)
-        
-        customColors[key] = (r, g, b)
 
+        customColors[key] = (r, g, b)
     
 def customPen(kpiKey, defaultPen):
     '''
@@ -648,6 +655,7 @@ def createStyle(kpi, custom = False, sqlIdx = None):
         dUnit = kpi['dUnit'].split('/')
         
         if len(sUnit) > 1 and len(dUnit) > 1 and sUnit[1] == 'sample' and dUnit[1] == 'sec':
+            # deb(f'{kpi["name"]}: {sUnit=}, {dUnit=}')
             style['sUnit'] = sUnit[0]
             style['dUnit'] = dUnit[0]
             style['perSample'] = True
@@ -703,7 +711,13 @@ def createStyle(kpi, custom = False, sqlIdx = None):
             style['shift'] = kpi.get('shift', 2)
             style['title'] = kpi.get('title')
             style['gradient'] = kpi.get('gradient')
-            
+            style['manual_color'] = kpi.get('manual_color')
+
+            if style['manual_color'] and style['gradient']:
+                log('[W] Gantt style cannot have both manual_color and gradient enabled', 1)
+                style['gradient'] = None
+                raise utils.customKPIException(f"[W] Gantt style cannot have both manual_color and gradient enable KPI: {kpi['name']}")
+
             style['style'] = kpi.get('style', 'bar')
             
             if style['style'] not in ('bar', 'candle'):
@@ -944,10 +958,18 @@ def groups(hostKPIsStyles):
     return groups
 
 def normalize (kpi, value, d = 0):
+    '''
+    convert value for display purpose based on sUnit/dUnit
+    used to calculate min/max for labels, etc in alignScales (once per getData)
+
+    1048576 MB/Byte --> 1.0
+    '''
+
 
     if 'sUnit' in kpi and 'dUnit' in kpi:
         sUnit, dUnit = kpi['sUnit'], kpi['dUnit']
     else:
+        log(f'norm: {kpi}, no sunit/dunit, no normalization', 5)
         return value
 
     nValue = None
@@ -960,7 +982,7 @@ def normalize (kpi, value, d = 0):
     elif sUnit == 'usec' and dUnit == 'sec':
         nValue = round(value/1000000, d)
 
-    # ('[N] %s: %s -> %s %i -> %s ' % (kpi['name'], kpi['sUnit'], kpi['dUnit'], value, str(nValue)))
+    # deb('[Norm] %s/%s: %s %i -> %s ' % (kpi['name'], kpi['sUnit'], kpi['dUnit'], value, str(nValue)))
     
     if nValue is not None:
         return nValue
@@ -1042,7 +1064,7 @@ def initKPIDescriptions(rows, hostKPIs, srvcKPIs, kpiStylesNN):
                     'hierarchy':    kpi[0],
                     'type':         hType,
                     'name':         kpiName,
-                    'group':        kpi[3],
+                    'group':        utils.safeInt(kpi[3]),
                     'label':        kpi[4],
                     'description':  kpi[5],
                     'sUnit':        kpi[6],

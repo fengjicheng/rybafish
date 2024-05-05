@@ -3,7 +3,7 @@
 '''
 import sys, os, time
 from PyQt5.QtWidgets import QMessageBox
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QColor
 
 from PyQt5.QtCore import QMutex
 
@@ -26,6 +26,7 @@ from io import StringIO
 import csv
 
 config = {}
+statement_hints = None
 
 global utils_alertReg
 __alertReg__ = None
@@ -42,8 +43,26 @@ decimal_digits = 6
 cfg_logmode = 'file'
 cfg_loglevel = 3
 cfg_logcomp = []
+cfg_servertz = None
 
 configStats = {}
+
+@profiler
+def setTZ(ts, s):
+    '''set explicit tzinfo to datetime object'''
+
+    if type(ts) != datetime:
+        log(f'[w] setTZ not a datetime object: {ts}, type: {type(ts)}', 1)
+        return ts
+
+    import datetime as dt
+    tz = dt.timezone(dt.timedelta(seconds=s))
+    return ts.replace(tzinfo=tz)
+
+def getTZ(s):
+    import datetime as dt
+    return dt.timezone(dt.timedelta(seconds=s))
+
 
 def pwdunhash(pwdhsh):
     pwd = pwdhsh[5:]
@@ -193,6 +212,11 @@ class cfgManager():
         except Exception as e:
             log('layout dump issue:' + str(e))
 
+class Preset():
+    '''KPIs preset class with it's own persistence but no dialog yet...'''
+    pass
+
+
 class Layout():
     
     lo = {}
@@ -246,9 +270,18 @@ class dbException(Exception):
 
     CONN = 1
     SQL = 2
+    PWD = 3
 
-    def __init__ (self, message, type=None):
-        self.type = type
+    def __init__ (self, message, type=None, code=None):
+        '''type - internal ryba type, code = pyhdb connection code'''
+        self.code = code
+
+        if code == 414:         # pasword reset error
+            log('[i] pwd reset request detected, type -> PWD', 2)
+            self.type = self.PWD
+        else:
+            self.type = type
+
         self.msg = message
         super().__init__(message, type)
         
@@ -256,8 +289,8 @@ class dbException(Exception):
     
         message = self.msg
         
-        if self.type is not None:
-            message += ', Type ' + str(self.type)
+        if self.code is not None:
+            message += ', code: ' + str(self.code)
     
         return message
 
@@ -510,6 +543,15 @@ else:
     mtx = fakeMutex()
 
 @profiler
+def loadHints():
+    global statement_hints
+
+    if statement_hints is None:
+        statement_hints = cfg('knownStatements', [])
+
+loadHints()
+
+@profiler
 def log(s, loglevel=3, nots=False, nonl=False, component=None,):
     '''
         log the stuff one way or another...
@@ -523,7 +565,7 @@ def log(s, loglevel=3, nots=False, nonl=False, component=None,):
     pfx = ''
 
     if component:
-        if cfg_logcomp and component in cfg_logcomp:
+        if cfg_logcomp and (component in cfg_logcomp or '*' in cfg_logcomp):
             pfx = f'[{component}] '
         else:
             return
@@ -737,6 +779,7 @@ def initGlobalSettings():
     global cfg_logmode
     global cfg_loglevel
     global cfg_logcomp
+    global cfg_servertz
     
     if cfg('dev'):
         configStats['dummy'] = 0
@@ -744,6 +787,7 @@ def initGlobalSettings():
     cfg_logmode = cfg('logmode')
     cfg_loglevel = cfg('loglevel', 3)
     cfg_logcomp = cfg('log_components', [])
+    cfg_servertz = cfg('serverTZ', True)
 
     if type(cfg_logcomp) != list:
         cfg_comp = []
@@ -943,12 +987,14 @@ def formatTimeShort(t):
 
 def formatTimeus(us):
     '''return formatted time in microsec'''
+    if us is None:
+        return ''
 
     s = numberToStr(us) + ' ' + chr(181) + 's'
     return s
 
 @profiler
-def formatTime(t, skipSeconds = False, skipMs = False):
+def formatTime(t, skipSeconds=False, skipMs=False):
     
     (ti, ms) = divmod(t, 1)
     
@@ -972,9 +1018,15 @@ def formatTime(t, skipSeconds = False, skipMs = False):
         s = time.strftime(format, time.gmtime(ti)) + msStr
     else:
         format = '%H:%M:%S'
+        s = ''
         msStr = '.%s' % ms if not skipMs else ''
-        s = time.strftime(format, time.gmtime(ti)) + msStr
-    
+        if ti >= 3600*24:
+            days, ti = divmod(ti, 3600*24)
+            days = int(days)
+            s = f'{days}D '
+
+        s += time.strftime(format, time.gmtime(ti)) + msStr
+
     if not skipSeconds:
         s += '   (' + str(round(t, 3)) + ')'
     
@@ -1185,6 +1237,15 @@ def extended_fromisoformat(v):
         if v.find('.') == -1:
             v += '.000'
 
+        else:
+            decimals = v.split('.')[1]
+            dec_len = len(decimals)
+
+            if dec_len > 6:
+                truncate = dec_len - 6
+                v = v[:-truncate] # truncate everything after 6 digit
+
+
         return datetime.strptime(v, '%Y-%m-%d %H:%M:%S.%f')
 
         raise ValueError
@@ -1203,7 +1264,7 @@ def extended_fromisoformat(v):
         raise ValueError
         '''
 
-def parseCSV(txt, delimiter=','):
+def parseCSV(txt, delimiter=',', trim=False):
     '''
         it takes all the values = strings as input and tries to detect
         if the column might be an integer or a timestamp
@@ -1265,21 +1326,21 @@ def parseCSV(txt, delimiter=','):
     
     @profiler
     def check_integer(j):
-        log('check column %i for int' % (j), 5)
+        log(f'check column #{j} ({header[j]}) for int, {trim=}', 5)
         
         reInt = re.compile(r'^-?\d+$')
         
         for ii in range(len(rows)):
             if not reInt.match(rows[ii][j]):
-                log(f'not a digit: row: {ii}, col: {j}: "{rows[ii][j]}"', 5)
-                log(f'not a digit, row for the reference: {str(rows[ii])}', 5)
+                log(f'not a number: row: {ii}, col: {j}: "{rows[ii][j]}"', 5)
+                log(f'not a number, row for the reference: {str(rows[ii])}', 5)
                 return False
                 
         return True
         
     def check_timestamp(j):
             
-        log('check column %i for timestamp' % (j), 5)
+        log(f'check column {j} for timestamp, {trim=}', 5)
         
         for ii in range(len(rows)):
             try:
@@ -1309,8 +1370,12 @@ def parseCSV(txt, delimiter=','):
         i+=1
         if len(row) != numCols:
             raise csvException(f'Unexpected number of values in row #{i}: {len(row)} != {numCols}')
-        rows.append(row)
-        
+
+        if trim:
+            rows.append([x.strip() for x in row ])
+        else:
+            rows.append(row)
+
     types = ['']*numCols
     
     #detect types
@@ -1541,3 +1606,31 @@ def timeToSeconds(s):
         return -sec
     else:
         return sec
+
+def colorMix(c1, c2):
+    (r1, g1, b1) = (c1.red(), c1.green(), c1.blue())
+    (r2, g2, b2) = (c2.red(), c2.green(), c2.blue())
+
+    r = int((r1 + r2)/2)
+    g = int((g1 + g2)/2)
+    b = int((b1 + b2)/2)
+
+    return QColor(r, g, b)
+
+def colorDarken(c, d):
+    (r, g, b) = (c.red(), c.green(), c.blue())
+
+    r = int(r * d)
+    g = int(g * d)
+    b = int(b * d)
+
+    return QColor(r, g, b)
+
+def pwd_escape(value):
+    ESCAPE_REGEX = re.compile(r'["]')
+    ESCAPE_MAP = {'"': '""'}
+
+    return "%s" % ESCAPE_REGEX.sub(
+        lambda match: ESCAPE_MAP.get(match.group(0)),
+        value
+    )
